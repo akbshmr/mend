@@ -330,6 +330,9 @@ function parseUnified(lines: string[], strict: boolean): Edit[] {
       };
     }
     if (sec === null) {
+      // A line starting with @@ outside any section is a hunk before any section, or no hunk at all: a parse
+      // error either way (section 6).
+      if (line.startsWith('@@')) throw new Exit2(`error: parse ${i + 1}`);
       i += 1;
       continue;
     }
@@ -408,7 +411,7 @@ function applyHunk(fs: FileState, h: Hunk, d: number, strict: boolean, path: str
   for (const e of h.entries) if (e.kind !== 'plus') o.push(e.text);
   if (o.length === 0) {
     const seg = buildSegment(fs.lines, 0, h.entries, 0);
-    const at = Math.min(h.a + d, fs.lines.length);
+    const at = Math.max(0, Math.min(h.a + d, fs.lines.length));
     const atEnd = at === fs.lines.length;
     fs.lines.splice(at, 0, ...seg);
     if (atEnd && seg.length > 0) fs.finalBreak = !h.lastCtxPlusNoNL;
@@ -581,15 +584,24 @@ function parseV4a(lines: string[], strict: boolean): Edit[] {
     if (line.startsWith(ADD_PRE)) {
       const p = line.slice(ADD_PRE.length).trim();
       i += 1;
+      const start = i;
+      let j = i;
+      while (j < lastNB && !isSectionStart(lines[j]!)) j += 1;
+      // Blank lines at the end of a section are not part of it (section 8), as for Update sections.
+      let end = j;
+      while (end > start && blank(lines[end - 1]!)) end -= 1;
       const fileLines: string[] = [];
-      while (i < lastNB && (lines[i]!.startsWith('+') || lines[i] === '')) {
-        fileLines.push(lines[i] === '' ? '' : lines[i]!.slice(1));
-        i += 1;
+      for (let k = start; k < end; k += 1) {
+        const l = lines[k]!;
+        if (l.startsWith('+')) fileLines.push(l.slice(1));
+        else if (l === '') fileLines.push('');
+        else throw new Exit2(`error: parse ${k + 1}`);
       }
+      i = j;
       edits.push((tree) => {
         if (!safe(p)) throw new Fail('unsafe', p);
         if (tree.get(p) !== null) throw new Fail('exists', p);
-        tree.now.set(p, `${fileLines.join('\n')}\n`);
+        tree.now.set(p, fileLines.length === 0 ? '' : `${fileLines.join('\n')}\n`);
       });
       continue;
     }
@@ -817,6 +829,7 @@ function run(args: string[]): { code: number; out: string[] } {
     try {
       edit(tree);
     } catch (e) {
+      if (e instanceof Exit2) return { code: 2, out: [e.line] };
       if (!(e instanceof Fail)) throw e;
       tree.now.clear();
       for (const [k, v] of before) tree.now.set(k, v);
